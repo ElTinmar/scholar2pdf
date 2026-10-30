@@ -5,7 +5,7 @@ Adds a DOI, a PDF link and an open-access copy (via Unpaywall) to each reference
 ## Requirements
 
 - Python 3.9 or newer
-- Internet access to `api.crossref.org`, to `api.unpaywall.org` if you use `--email`, and to `www.ncbi.nlm.nih.gov`, `ftp.ncbi.nlm.nih.gov` and `europepmc.org` for the PMC fallback
+- Internet access to `api.crossref.org`, to `api.unpaywall.org` if you use `--email`, and to `pmc.ncbi.nlm.nih.gov` and `pmc-oa-opendata.s3.amazonaws.com` for the PMC fallback
 - `numbers-parser`, only for `.numbers` input:
 
   ```
@@ -73,7 +73,7 @@ Every field is quoted, so commas or semicolons in titles never shift columns.
 4. The PDF link is built from publisher patterns (Nature, Science, Wiley, Springer, Frontiers, eLife, PNAS, bioRxiv, arXiv, PLOS and others), or from Crossref's own full-text links. Cell Press and Elsevier papers get a ScienceDirect link.
 5. With `--email`, each DOI is looked up on Unpaywall (`api.unpaywall.org/v2/<DOI>`), which reports the paper's open-access status and its best free copy.
 6. With `--download`, the open-access copy is tried first, then the publisher PDF link. A file is kept only if it really is a PDF (publishers often answer with a sign-in or cookie page instead). PDFs already in the folder are not downloaded again, so an interrupted run can simply be restarted.
-7. If that fails, the script looks the DOI up in PubMed Central (NCBI ID converter). If the paper is there, it tries PMC's open-access file service (a PDF, or the article package with the PDF inside) and then Europe PMC's PDF rendering.
+7. If that fails, the script looks the DOI up in PubMed Central (NCBI ID converter). If the paper has a PMC ID, it downloads the PDF from PMC's open-access dataset on AWS (`pmc-oa-opendata.s3.amazonaws.com`), which NCBI provides for scripted downloads. This replaces NCBI's older OA web service (`oa.fcgi`), which was retired in August 2026.
 
 ## Limitations
 
@@ -81,5 +81,5 @@ Every field is quoted, so commas or semicolons in titles never shift columns.
 - A preprint whose title changed after your export may not match.
 - When a paper exists both as a preprint and as an article, the wrong version is occasionally picked. Check the DOI against the Publication column.
 - Links aren't checked for reachability. Paywalled publisher PDFs need your institution's access; check the Open access PDF column first.
-- PubMed Central only helps for papers that are in PMC. PMC's file service only covers its open-access subset, and Europe PMC sometimes shows a browser check instead of the PDF.
+- PubMed Central only helps for papers that are in PMC, and the AWS dataset only holds PMC's open-access and author-manuscript articles.
 - `--download` gets open-access papers reliably, and paywalled ones only when run on your institution's network or VPN. Even then, some publishers block scripted downloads. For the remaining papers, Zotero's "Add Item(s) by Identifier" (paste the DOIs) usually does better.

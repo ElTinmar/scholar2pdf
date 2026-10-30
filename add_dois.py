@@ -5,12 +5,10 @@ Needs `pip install numbers-parser` only for .numbers input.
 """
 import argparse
 import csv
-import io
 import json
 import os
 import re
 import sys
-import tarfile
 import time
 import urllib.error
 import urllib.parse
@@ -154,10 +152,6 @@ def download(urls: list[tuple[str, str]], path: Path) -> tuple[bool, str]:
         except Exception:
             reasons.append(f'could not connect to {host}')
             continue
-        if url.endswith('.tar.gz'):
-            with tarfile.open(fileobj=io.BytesIO(data)) as tar:
-                pdfs = sorted((m for m in tar.getmembers() if m.name.lower().endswith('.pdf')), key=lambda m: m.size)
-                data = tar.extractfile(pdfs[-1]).read() if pdfs else b''
         if not data.startswith(b'%PDF-'):
             reasons.append(f'{host} sent a web page, not a PDF')
             continue
@@ -167,7 +161,7 @@ def download(urls: list[tuple[str, str]], path: Path) -> tuple[bool, str]:
 
 
 def pmc_urls(doi: str, email: str) -> tuple[list[tuple[str, str]], str]:
-    """PubMed Central copies of the paper (PMC open-access files, then Europe PMC), or why there are none."""
+    """PDFs of the paper in the PMC open-access dataset on AWS (newest version first), or why there are none."""
     query = urllib.parse.urlencode({'ids': doi, 'format': 'json', 'tool': 'add_dois', 'email': email})
     pmcid, errors = None, []
     for api in ('https://pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles/', 'https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/'):
@@ -180,14 +174,15 @@ def pmc_urls(doi: str, email: str) -> tuple[list[tuple[str, str]], str]:
         return [], 'PMC lookup failed (' + '; '.join(errors) + ')'
     if not pmcid:
         return [], 'not in PMC'
-    urls = [('Europe PMC', f'https://europepmc.org/articles/{pmcid}?pdf=render')]
+    bucket = 'https://pmc-oa-opendata.s3.amazonaws.com'
     try:
-        oa = urllib.request.urlopen(f'https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi?id={pmcid}', timeout=60).read().decode()
+        listing = urllib.request.urlopen(f'{bucket}/?list-type=2&prefix={pmcid}.', timeout=60).read().decode()
     except Exception as e:
-        return urls, f'{pmcid}, PMC file service failed ({e})'
-    files = sorted(re.findall(r'format="(pdf|tgz)"[^>]*href="([^"]+)"', oa))
-    note = '' if files else f'{pmcid} not in PMC open-access subset'
-    return [('PMC', href.replace('ftp://', 'https://')) for _, href in files] + urls, note
+        return [], f'{pmcid}, PMC cloud listing failed ({e})'
+    pdfs = sorted(re.findall(r'<Key>([^<]+\.pdf)</Key>', listing), key=lambda k: int(re.search(r'\.(\d+)/', k).group(1)))
+    if not pdfs:
+        return [], f'{pmcid} has no PDF in the PMC open-access dataset'
+    return [('PMC', f'{bucket}/{key}') for key in reversed(pdfs)], ''
 
 
 def file_name(row: dict[str, str]) -> str:
