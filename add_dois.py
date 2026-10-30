@@ -11,6 +11,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -55,6 +56,7 @@ def get(url: str) -> dict:
         except urllib.error.HTTPError as e:
             if e.code != 429:
                 raise
+            print(f'  rate-limited by {urllib.parse.urlparse(url).netloc}, waiting {wait}s', flush=True)
             time.sleep(wait)
     raise RuntimeError(f'Kept being rate-limited: {url}')
 
@@ -111,19 +113,30 @@ def pdf_link(item: dict) -> tuple[str, str]:
     return f'https://doi.org/{doi}', 'article page'
 
 
-def download(urls: list[str], path: Path) -> bool:
+def download(urls: list[tuple[str, str]], path: Path) -> tuple[bool, str]:
+    """Returns success and where the PDF came from, or why it failed."""
     if path.exists():
-        return True
-    for url in urls:
+        return True, 'already downloaded'
+    if not urls:
+        return False, 'no direct PDF link known'
+    reasons = []
+    for source, url in urls:
+        host = urllib.parse.urlparse(url).netloc
         try:
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0', 'Accept': 'application/pdf,*/*'})
             data = urllib.request.urlopen(req, timeout=60).read()
-        except Exception:
+        except urllib.error.HTTPError as e:
+            reasons.append(f'{host} HTTP {e.code}')
             continue
-        if data.startswith(b'%PDF-'):
-            path.write_bytes(data)
-            return True
-    return False
+        except Exception:
+            reasons.append(f'could not connect to {host}')
+            continue
+        if not data.startswith(b'%PDF-'):
+            reasons.append(f'{host} sent a web page, not a PDF')
+            continue
+        path.write_bytes(data)
+        return True, f'{source} ({len(data) / 1e6:.1f} MB)'
+    return False, '; '.join(reasons)
 
 
 def file_name(row: dict[str, str]) -> str:
@@ -141,27 +154,48 @@ def main() -> None:
     if args.download:
         args.download.mkdir(parents=True, exist_ok=True)
 
-    def process(row: dict[str, str]) -> list[str]:
+    def process(row: dict[str, str]) -> tuple[list[str], str]:
         item = find(row, args.email)
         if not item:
-            return [''] * 6
+            return [''] * 6, 'no confident DOI match'
         link, kind = pdf_link(item)
         status, oa_pdf = unpaywall(item['DOI'], args.email) if args.email else ('', '')
-        name = file_name(row)
-        urls = [u for u in (oa_pdf, link if kind == 'PDF' else '') if u]
-        got = bool(args.download) and download(urls, args.download / name)
-        return [f"https://doi.org/{item['DOI']}", link, kind, status, oa_pdf, name if got else '']
+        report = item['DOI'] + (f' | OA: {status}' if args.email else '')
+        name = ''
+        if args.download:
+            urls = [(src, u) for src, u in (('open-access copy', oa_pdf), ('publisher', link if kind == 'PDF' else '')) if u]
+            ok, why = download(urls, args.download / file_name(row))
+            name = file_name(row) if ok else ''
+            report += f" | {'PDF: ' if ok else 'no PDF: '}{why}"
+        return [f"https://doi.org/{item['DOI']}", link, kind, status, oa_pdf, name], report
 
     rows = load(args.input)
+    print(f'{len(rows)} references in {args.input.name}. Looking up DOIs on Crossref'
+          + (', open-access status on Unpaywall' if args.email else ' (no --email: Unpaywall skipped)')
+          + (f', downloading PDFs to {args.download}/' if args.download else '') + '.', flush=True)
+    t0, extra = time.time(), []
     with ThreadPoolExecutor(2) as ex:
-        extra = list(ex.map(process, rows))
+        for i, (row, (cells, report)) in enumerate(zip(rows, ex.map(process, rows)), 1):
+            extra.append(cells)
+            print(f"[{i}/{len(rows)}] {row['Authors'].split(',')[0]} {row['Year']}: {report}", flush=True)
 
     out = args.output or args.input.with_name(args.input.stem + '_with_doi.csv')
     with open(out, 'w', newline='', encoding='utf-8-sig') as f:
         w = csv.writer(f, quoting=csv.QUOTE_ALL)
         w.writerow([*rows[0], 'DOI', 'PDF link', 'PDF link type', 'OA status', 'Open access PDF', 'Downloaded file'])
         w.writerows([*row.values(), *e] for row, e in zip(rows, extra))
-    print(f'{sum(bool(e[0]) for e in extra)}/{len(rows)} DOIs found, {sum(bool(e[4]) for e in extra)} open-access copies, {sum(bool(e[5]) for e in extra)} PDFs downloaded -> {out}')
+
+    n = len(rows)
+    print(f'\nDone in {time.time() - t0:.0f}s. Results in {out}')
+    print(f'  DOIs found:         {sum(bool(e[0]) for e in extra)}/{n}')
+    if args.email:
+        oa = Counter(e[3] for e in extra if e[3])
+        print(f'  Open-access copies: {sum(bool(e[4]) for e in extra)}/{n} (' + ', '.join(f'{k} {v}' for k, v in oa.most_common()) + ')')
+    if args.download:
+        print(f'  PDFs downloaded:    {sum(bool(e[5]) for e in extra)}/{n} in {args.download}/')
+    missing = [row['Title'][:70] for row, e in zip(rows, extra) if not e[0]]
+    if missing:
+        print('  No DOI for:\n' + '\n'.join(f'    - {t}' for t in missing))
 
 
 if __name__ == '__main__':
