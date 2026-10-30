@@ -113,7 +113,7 @@ def main() -> None:
 
     out = args.output or args.input.with_name(args.input.stem + '_with_doi.csv')
     with open(out, 'w', newline='', encoding='utf-8-sig') as f:
-        w = csv.writer(f)
+        w = csv.writer(f, quoting=csv.QUOTE_ALL)
         w.writerow([*rows[0], 'DOI', 'PDF link', 'PDF link type'])
         for row, item in zip(rows, items):
             w.writerow([*row.values(), *([f"https://doi.org/{item['DOI']}", *pdf_link(item)] if item else ['', '', ''])])
