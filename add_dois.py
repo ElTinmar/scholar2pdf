@@ -1,6 +1,6 @@
 """Add DOI and PDF links to a Google Scholar citation export (.csv or .numbers).
 
-Usage: python add_dois.py citations.numbers [-o out.csv] [--mailto you@example.org]
+Usage: python add_dois.py citations.numbers [-o out.csv] [--email you@example.org] [--download pdfs]
 Needs `pip install numbers-parser` only for .numbers input.
 """
 import argparse
@@ -51,12 +51,12 @@ def load(path: Path) -> list[dict[str, str]]:
 def get(url: str) -> dict:
     for wait in (2, 5, 10, 20, 40, 60):
         try:
-            return json.load(urllib.request.urlopen(url, timeout=60))['message']
+            return json.load(urllib.request.urlopen(url, timeout=60))
         except urllib.error.HTTPError as e:
             if e.code != 429:
                 raise
             time.sleep(wait)
-    raise RuntimeError(f'Crossref kept rate-limiting: {url}')
+    raise RuntimeError(f'Kept being rate-limited: {url}')
 
 
 def norm(s: str) -> str:
@@ -69,14 +69,14 @@ def venue_match(item: dict, venue: str) -> bool:
     return biorxiv or bool(container and venue and (container in venue or venue in container))
 
 
-def find(row: dict[str, str], mailto: str) -> dict:
+def find(row: dict[str, str], email: str) -> dict:
     if m := re.search(r'arXiv:(\d{4}\.\d{4,5})', row['Publication'], re.I):
         return {'DOI': f'10.48550/arxiv.{m.group(1)}'}
     query = f"{row['Title']} {row['Authors'].split(',')[0]} {row['Year']}"
-    params = {'query.bibliographic': query, 'rows': 8, 'select': 'DOI,title,issued,type,link,container-title'} | ({'mailto': mailto} if mailto else {})
+    params = {'query.bibliographic': query, 'rows': 8, 'select': 'DOI,title,issued,type,link,container-title'} | ({'mailto': email} if email else {})
     preprint = bool(re.search(r'biorxiv|arxiv', row['Publication'], re.I))
     best, best_score = {}, 0.0
-    for item in get(f'{API}?{urllib.parse.urlencode(params)}')['items']:
+    for item in get(f'{API}?{urllib.parse.urlencode(params)}')['message']['items']:
         sim = SequenceMatcher(None, norm(row['Title']), norm((item.get('title') or [''])[0])).ratio()
         year = (item.get('issued', {}).get('date-parts') or [[None]])[0][0]
         score = sim + 0.05 * ((item['type'] == 'posted-content') == preprint) + 0.1 * venue_match(item, row['Publication']) \
@@ -86,6 +86,17 @@ def find(row: dict[str, str], mailto: str) -> dict:
     if best:
         best['DOI'] = re.sub(r'/v\d+/review\d+$', '', re.sub(r'(elife\.\d+)\.\d+$', r'\1', best['DOI'].lower()))
     return best
+
+
+def unpaywall(doi: str, email: str) -> tuple[str, str]:
+    try:
+        record = get(f'https://api.unpaywall.org/v2/{urllib.parse.quote(doi)}?email={urllib.parse.quote(email)}')
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return '', ''
+        raise
+    location = record.get('best_oa_location') or {}
+    return record.get('oa_status') or '', location.get('url_for_pdf') or location.get('url') or ''
 
 
 def pdf_link(item: dict) -> tuple[str, str]:
@@ -100,24 +111,57 @@ def pdf_link(item: dict) -> tuple[str, str]:
     return f'https://doi.org/{doi}', 'article page'
 
 
+def download(urls: list[str], path: Path) -> bool:
+    if path.exists():
+        return True
+    for url in urls:
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0', 'Accept': 'application/pdf,*/*'})
+            data = urllib.request.urlopen(req, timeout=60).read()
+        except Exception:
+            continue
+        if data.startswith(b'%PDF-'):
+            path.write_bytes(data)
+            return True
+    return False
+
+
+def file_name(row: dict[str, str]) -> str:
+    stem = f"{row['Authors'].split(',')[0]}_{row['Year']}_{' '.join(row['Title'].split()[:8])}"
+    return re.sub(r'[^\w-]+', '_', stem)[:100].strip('_') + '.pdf'
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('input', type=Path)
     ap.add_argument('-o', '--output', type=Path)
-    ap.add_argument('--mailto', default='', help='your email, for Crossref\'s faster "polite" pool')
+    ap.add_argument('--email', default='', help='your email: enables Unpaywall and Crossref\'s faster "polite" pool')
+    ap.add_argument('--download', type=Path, metavar='DIR', help='also download the PDFs into this folder')
     args = ap.parse_args()
+    if args.download:
+        args.download.mkdir(parents=True, exist_ok=True)
+
+    def process(row: dict[str, str]) -> list[str]:
+        item = find(row, args.email)
+        if not item:
+            return [''] * 6
+        link, kind = pdf_link(item)
+        status, oa_pdf = unpaywall(item['DOI'], args.email) if args.email else ('', '')
+        name = file_name(row)
+        urls = [u for u in (oa_pdf, link if kind == 'PDF' else '') if u]
+        got = bool(args.download) and download(urls, args.download / name)
+        return [f"https://doi.org/{item['DOI']}", link, kind, status, oa_pdf, name if got else '']
 
     rows = load(args.input)
     with ThreadPoolExecutor(2) as ex:
-        items = list(ex.map(lambda r: find(r, args.mailto), rows))
+        extra = list(ex.map(process, rows))
 
     out = args.output or args.input.with_name(args.input.stem + '_with_doi.csv')
     with open(out, 'w', newline='', encoding='utf-8-sig') as f:
         w = csv.writer(f, quoting=csv.QUOTE_ALL)
-        w.writerow([*rows[0], 'DOI', 'PDF link', 'PDF link type'])
-        for row, item in zip(rows, items):
-            w.writerow([*row.values(), *([f"https://doi.org/{item['DOI']}", *pdf_link(item)] if item else ['', '', ''])])
-    print(f'{sum(map(bool, items))}/{len(rows)} DOIs found -> {out}')
+        w.writerow([*rows[0], 'DOI', 'PDF link', 'PDF link type', 'OA status', 'Open access PDF', 'Downloaded file'])
+        w.writerows([*row.values(), *e] for row, e in zip(rows, extra))
+    print(f'{sum(bool(e[0]) for e in extra)}/{len(rows)} DOIs found, {sum(bool(e[4]) for e in extra)} open-access copies, {sum(bool(e[5]) for e in extra)} PDFs downloaded -> {out}')
 
 
 if __name__ == '__main__':
