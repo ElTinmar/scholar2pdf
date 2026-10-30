@@ -6,7 +6,9 @@ Needs `pip install numbers-parser` only for .numbers input.
 import argparse
 import csv
 import json
+import os
 import re
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -36,6 +38,25 @@ PATTERNS = {
     '10.1103': lambda d: f'https://journals.aps.org/prx/pdf/{d}',
     '10.1371': lambda d: f'https://journals.plos.org/{PLOS[d.split("journal.")[1][:4]]}/article/file?id={d}&type=printable',
 }
+COLOR = sys.stdout.isatty() and 'NO_COLOR' not in os.environ
+
+
+def paint(text: str, code: str) -> str:
+    return f'\033[{code}m{text}\033[0m' if COLOR else text
+
+
+def green(text: str) -> str:
+    return paint(text, '32')
+
+
+def red(text: str) -> str:
+    return paint(text, '31')
+
+
+def yellow(text: str) -> str:
+    return paint(text, '33')
+
+
 TDM_HOSTS = ('syndication.highwire.org', 'api.wiley.com', 'harvest.aps.org', 'link.aps.org', 'api.elsevier.com', 'dx.plos.org')
 
 
@@ -56,7 +77,7 @@ def get(url: str) -> dict:
         except urllib.error.HTTPError as e:
             if e.code != 429:
                 raise
-            print(f'  rate-limited by {urllib.parse.urlparse(url).netloc}, waiting {wait}s', flush=True)
+            print(yellow(f'  rate-limited by {urllib.parse.urlparse(url).netloc}, waiting {wait}s'), flush=True)
             time.sleep(wait)
     raise RuntimeError(f'Kept being rate-limited: {url}')
 
@@ -157,16 +178,16 @@ def main() -> None:
     def process(row: dict[str, str]) -> tuple[list[str], str]:
         item = find(row, args.email)
         if not item:
-            return [''] * 6, 'no confident DOI match'
+            return [''] * 6, red('no confident DOI match')
         link, kind = pdf_link(item)
         status, oa_pdf = unpaywall(item['DOI'], args.email) if args.email else ('', '')
-        report = item['DOI'] + (f' | OA: {status}' if args.email else '')
+        report = green(item['DOI']) + (f" | OA: {(red if status in ('closed', '') else green)(status or 'unknown')}" if args.email else '')
         name = ''
         if args.download:
             urls = [(src, u) for src, u in (('open-access copy', oa_pdf), ('publisher', link if kind == 'PDF' else '')) if u]
             ok, why = download(urls, args.download / file_name(row))
             name = file_name(row) if ok else ''
-            report += f" | {'PDF: ' if ok else 'no PDF: '}{why}"
+            report += ' | ' + (green(f'PDF: {why}') if ok else red(f'no PDF: {why}'))
         return [f"https://doi.org/{item['DOI']}", link, kind, status, oa_pdf, name], report
 
     rows = load(args.input)
@@ -187,15 +208,15 @@ def main() -> None:
 
     n = len(rows)
     print(f'\nDone in {time.time() - t0:.0f}s. Results in {out}')
-    print(f'  DOIs found:         {sum(bool(e[0]) for e in extra)}/{n}')
+    print(f'  DOIs found:         {green(str(sum(bool(e[0]) for e in extra)))}/{n}')
     if args.email:
         oa = Counter(e[3] for e in extra if e[3])
-        print(f'  Open-access copies: {sum(bool(e[4]) for e in extra)}/{n} (' + ', '.join(f'{k} {v}' for k, v in oa.most_common()) + ')')
+        print(f'  Open-access copies: {green(str(sum(bool(e[4]) for e in extra)))}/{n} (' + ', '.join(f'{k} {v}' for k, v in oa.most_common()) + ')')
     if args.download:
-        print(f'  PDFs downloaded:    {sum(bool(e[5]) for e in extra)}/{n} in {args.download}/')
+        print(f'  PDFs downloaded:    {green(str(sum(bool(e[5]) for e in extra)))}/{n} in {args.download}/')
     missing = [row['Title'][:70] for row, e in zip(rows, extra) if not e[0]]
     if missing:
-        print('  No DOI for:\n' + '\n'.join(f'    - {t}' for t in missing))
+        print(red('  No DOI for:') + '\n' + '\n'.join(red(f'    - {t}') for t in missing))
 
 
 if __name__ == '__main__':
