@@ -21,7 +21,7 @@ PATTERNS = {
     '10.1038': lambda d: f'https://www.nature.com/articles/{d.split("/", 1)[1]}.pdf',
     '10.1126': lambda d: f'https://www.science.org/doi/pdf/{d}',
     '10.3389': lambda d: f'https://www.frontiersin.org/articles/{d}/pdf',
-    '10.7554': lambda d: f'https://elifesciences.org/articles/{re.search(r"elife\.(\d+)", d).group(1)}.pdf',
+    '10.7554': lambda d: f'https://elifesciences.org/articles/{d.split(".")[2]}.pdf',
     '10.1002': lambda d: f'https://onlinelibrary.wiley.com/doi/pdf/{d}',
     '10.1111': lambda d: f'https://onlinelibrary.wiley.com/doi/pdf/{d}',
     '10.1113': lambda d: f'https://onlinelibrary.wiley.com/doi/pdf/{d}',
