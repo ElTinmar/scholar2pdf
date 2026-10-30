@@ -5,10 +5,12 @@ Needs `pip install numbers-parser` only for .numbers input.
 """
 import argparse
 import csv
+import io
 import json
 import os
 import re
 import sys
+import tarfile
 import time
 import urllib.error
 import urllib.parse
@@ -152,12 +154,32 @@ def download(urls: list[tuple[str, str]], path: Path) -> tuple[bool, str]:
         except Exception:
             reasons.append(f'could not connect to {host}')
             continue
+        if url.endswith('.tar.gz'):
+            with tarfile.open(fileobj=io.BytesIO(data)) as tar:
+                pdfs = sorted((m for m in tar.getmembers() if m.name.lower().endswith('.pdf')), key=lambda m: m.size)
+                data = tar.extractfile(pdfs[-1]).read() if pdfs else b''
         if not data.startswith(b'%PDF-'):
             reasons.append(f'{host} sent a web page, not a PDF')
             continue
         path.write_bytes(data)
         return True, f'{source} ({len(data) / 1e6:.1f} MB)'
     return False, '; '.join(reasons)
+
+
+def pmc_urls(doi: str, email: str) -> list[tuple[str, str]]:
+    """PubMed Central copies of the paper: PMC open-access files, then Europe PMC's PDF rendering."""
+    ncbi = 'https://www.ncbi.nlm.nih.gov/pmc/utils'
+    try:
+        ids = get(f'{ncbi}/idconv/v1.0/?' + urllib.parse.urlencode({'ids': doi, 'format': 'json', 'tool': 'add_dois', 'email': email}))
+        pmcid = ids['records'][0].get('pmcid')
+        if not pmcid:
+            return []
+        oa = urllib.request.urlopen(f'{ncbi}/oa/oa.fcgi?id={pmcid}', timeout=60).read().decode()
+    except Exception:
+        return []
+    files = sorted(re.findall(r'format="(pdf|tgz)"[^>]*href="([^"]+)"', oa))
+    return [('PMC', href.replace('ftp://', 'https://')) for _, href in files] \
+        + [('Europe PMC', f'https://europepmc.org/articles/{pmcid}?pdf=render')]
 
 
 def file_name(row: dict[str, str]) -> str:
@@ -186,6 +208,9 @@ def main() -> None:
         if args.download:
             urls = [(src, u) for src, u in (('open-access copy', oa_pdf), ('publisher', link if kind == 'PDF' else '')) if u]
             ok, why = download(urls, args.download / file_name(row))
+            if not ok and (pmc := pmc_urls(item['DOI'], args.email)):
+                ok, why_pmc = download(pmc, args.download / file_name(row))
+                why = why_pmc if ok else f'{why}; {why_pmc}'.strip('; ')
             name = file_name(row) if ok else ''
             report += ' | ' + (green(f'PDF: {why}') if ok else red(f'no PDF: {why}'))
         return [f"https://doi.org/{item['DOI']}", link, kind, status, oa_pdf, name], report
