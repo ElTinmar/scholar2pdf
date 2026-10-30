@@ -166,20 +166,28 @@ def download(urls: list[tuple[str, str]], path: Path) -> tuple[bool, str]:
     return False, '; '.join(reasons)
 
 
-def pmc_urls(doi: str, email: str) -> list[tuple[str, str]]:
-    """PubMed Central copies of the paper: PMC open-access files, then Europe PMC's PDF rendering."""
-    ncbi = 'https://www.ncbi.nlm.nih.gov/pmc/utils'
+def pmc_urls(doi: str, email: str) -> tuple[list[tuple[str, str]], str]:
+    """PubMed Central copies of the paper (PMC open-access files, then Europe PMC), or why there are none."""
+    query = urllib.parse.urlencode({'ids': doi, 'format': 'json', 'tool': 'add_dois', 'email': email})
+    pmcid, errors = None, []
+    for api in ('https://pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles/', 'https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/'):
+        try:
+            pmcid = (get(f'{api}?{query}')['records'] or [{}])[0].get('pmcid') or ''
+            break
+        except Exception as e:
+            errors.append(f'{urllib.parse.urlparse(api).netloc}: {e}')
+    if pmcid is None:
+        return [], 'PMC lookup failed (' + '; '.join(errors) + ')'
+    if not pmcid:
+        return [], 'not in PMC'
+    urls = [('Europe PMC', f'https://europepmc.org/articles/{pmcid}?pdf=render')]
     try:
-        ids = get(f'{ncbi}/idconv/v1.0/?' + urllib.parse.urlencode({'ids': doi, 'format': 'json', 'tool': 'add_dois', 'email': email}))
-        pmcid = ids['records'][0].get('pmcid')
-        if not pmcid:
-            return []
-        oa = urllib.request.urlopen(f'{ncbi}/oa/oa.fcgi?id={pmcid}', timeout=60).read().decode()
-    except Exception:
-        return []
+        oa = urllib.request.urlopen(f'https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi?id={pmcid}', timeout=60).read().decode()
+    except Exception as e:
+        return urls, f'{pmcid}, PMC file service failed ({e})'
     files = sorted(re.findall(r'format="(pdf|tgz)"[^>]*href="([^"]+)"', oa))
-    return [('PMC', href.replace('ftp://', 'https://')) for _, href in files] \
-        + [('Europe PMC', f'https://europepmc.org/articles/{pmcid}?pdf=render')]
+    note = '' if files else f'{pmcid} not in PMC open-access subset'
+    return [('PMC', href.replace('ftp://', 'https://')) for _, href in files] + urls, note
 
 
 def file_name(row: dict[str, str]) -> str:
@@ -208,9 +216,10 @@ def main() -> None:
         if args.download:
             urls = [(src, u) for src, u in (('open-access copy', oa_pdf), ('publisher', link if kind == 'PDF' else '')) if u]
             ok, why = download(urls, args.download / file_name(row))
-            if not ok and (pmc := pmc_urls(item['DOI'], args.email)):
-                ok, why_pmc = download(pmc, args.download / file_name(row))
-                why = why_pmc if ok else f'{why}; {why_pmc}'.strip('; ')
+            if not ok:
+                pmc, note = pmc_urls(item['DOI'], args.email)
+                ok, why_pmc = download(pmc, args.download / file_name(row)) if pmc else (False, '')
+                why = why_pmc if ok else '; '.join(x for x in (why, note, why_pmc) if x)
             name = file_name(row) if ok else ''
             report += ' | ' + (green(f'PDF: {why}') if ok else red(f'no PDF: {why}'))
         return [f"https://doi.org/{item['DOI']}", link, kind, status, oa_pdf, name], report
